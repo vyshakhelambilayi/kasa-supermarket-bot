@@ -66,6 +66,13 @@
             <version>5.11.4</version>
             <scope>test</scope>
         </dependency>
+
+        <!-- Postgress socket factory -->
+        <dependency>
+            <groupId>com.google.cloud.sql</groupId>
+            <artifactId>postgres-socket-factory</artifactId>
+            <version>1.18.1</version> <!-- Use the latest stable version -->
+        </dependency>
     </dependencies>
 
     <build>
