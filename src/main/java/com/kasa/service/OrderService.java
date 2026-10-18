@@ -53,6 +53,7 @@ public class OrderService {
         boolean isOrder = "NEW_ORDER".equals(intent);
         boolean hasUnmatchedItem = false;
         boolean hasMissingQuantity = false;
+        boolean hasAmbiguousItem = false;
         List<UnavailableItem> unavailableItems = new ArrayList<>();
         List<DisplayRow> rows = new ArrayList<>();
         List<String> problems = new ArrayList<>();
@@ -63,6 +64,24 @@ public class OrderService {
             String productName = requested.getProductName().isBlank()
                     ? requested.getItemName() : requested.getProductName();
             ProductService.MatchResult match = productService.matchInventoryItem(productName);
+            if (match.status() == ProductService.MatchResult.Status.AMBIGUOUS) {
+                String requestedQuantity = requested.getQuantity().isBlank() ? "1" : requested.getQuantity();
+                List<CandidateItem> alternatives = match.alternatives().stream()
+                        .map(CandidateItem::from)
+                        .toList();
+                rows.add(new DisplayRow(requested.getItemName(),
+                        "Please choose: " + alternatives.stream().map(CandidateItem::itemName)
+                                .collect(java.util.stream.Collectors.joining(", ")),
+                        null, requestedQuantity, "Reply with the option number."));
+                if (isOrder) {
+                    int quantity = parseQuantity(requestedQuantity) == null ? 1 : parseQuantity(requestedQuantity);
+                    unavailableItems.add(new UnavailableItem(requested.getItemName(), productName, quantity,
+                            alternatives));
+                    hasUnmatchedItem = true;
+                    hasAmbiguousItem = true;
+                }
+                continue;
+            }
             if (match.status() != ProductService.MatchResult.Status.MATCHED) {
                 rows.add(new DisplayRow(requested.getItemName(), messages.getUnavailable(),
                         null, requested.getQuantity(), messages.getUnavailable()));
@@ -117,6 +136,11 @@ public class OrderService {
         }
 
         String totalLine = labels.getTotal() + ": ₹" + money(total);
+        if (hasAmbiguousItem) {
+            String choices = ambiguityPrompt(unavailableItems);
+            return new Result(greeting + "\n" + title + ":\n\n" + table + "\n\n" + choices,
+                    new PendingOrder(customer, orderItems, total, false, unavailableItems));
+        }
         if (!problems.isEmpty()) {
             String suffix = "\n\n" + messages.getStockIssue() + "\n• " + String.join("\n• ", problems);
             if (!hasUnmatchedItem && hasMissingQuantity) {
@@ -143,6 +167,9 @@ public class OrderService {
     }
 
     public Result handlePendingMessage(PendingOrder pending, File mediaFile, String text) throws Exception {
+        if (pending.unavailableItems().stream().anyMatch(item -> !item.alternatives().isEmpty())) {
+            return resolveAmbiguousChoice(pending, text);
+        }
         String context = pending.items().stream()
                 .map(item -> item.getItemName() + ": " + item.getQuantity())
                 .collect(java.util.stream.Collectors.joining(", "));
@@ -172,6 +199,102 @@ public class OrderService {
             }
             default -> { return new Result(messages.getClarify(), pending); }
         }
+    }
+
+    private Result resolveAmbiguousChoice(PendingOrder pending, String text) {
+        int ambiguousIndex = -1;
+        for (int i = 0; i < pending.unavailableItems().size(); i++) {
+            if (!pending.unavailableItems().get(i).alternatives().isEmpty()) {
+                ambiguousIndex = i;
+                break;
+            }
+        }
+        UnavailableItem ambiguous = pending.unavailableItems().get(ambiguousIndex);
+        CandidateItem selected = selectCandidate(ambiguous, text);
+        if (selected == null) {
+            return new Result(ambiguityPrompt(pending.unavailableItems()), pending);
+        }
+
+        List<UnavailableItem> remaining = new ArrayList<>(pending.unavailableItems());
+        remaining.remove(ambiguousIndex);
+        Map<String, OrderItem> itemsByNumber = new LinkedHashMap<>();
+        for (OrderItem item : pending.items()) itemsByNumber.put(item.getItemNumber(), item);
+        InventoryItem inventory = selected.toInventoryItem();
+        OrderItem addition = new OrderItem(inventory.getItemNumber(), inventory.getItemName(),
+                ambiguous.quantity(), inventory.getPrice());
+        itemsByNumber.merge(inventory.getItemNumber(), addition, (old, add) -> new OrderItem(
+                old.getItemNumber(), old.getItemName(), old.getQuantity() + add.getQuantity(), old.getUnitPrice()));
+        List<OrderItem> items = new ArrayList<>(itemsByNumber.values());
+        BigDecimal total = items.stream().map(OrderItem::getLineTotal).reduce(BigDecimal.ZERO, BigDecimal::add);
+        PendingOrder updated = new PendingOrder(pending.customer(), items, total, false, remaining);
+        if (remaining.stream().anyMatch(item -> !item.alternatives().isEmpty())) {
+            return new Result("Added " + inventory.getItemName() + ".\n\n" + ambiguityPrompt(remaining), updated);
+        }
+
+        StringBuilder reply = new StringBuilder("Added ").append(inventory.getItemName()).append(".\n\n")
+                .append("Please review your order:\n");
+        boolean stockIssue = false;
+        for (OrderItem item : items) {
+            reply.append("• ").append(item.getItemName()).append(" × ").append(item.getQuantity())
+                    .append(" — ₹").append(money(item.getLineTotal()));
+            if (item.getQuantity() <= 0) {
+                stockIssue = true;
+                reply.append(" (quantity needed)");
+            } else {
+                ProductService.MatchResult stockMatch = productService.matchInventoryItem(item.getItemName());
+                if (stockMatch.status() != ProductService.MatchResult.Status.MATCHED) {
+                    stockIssue = true;
+                    reply.append(" (please clarify this item)");
+                } else if (item.getQuantity() > stockMatch.item().getQuantityAvailable()) {
+                    stockIssue = true;
+                    reply.append(" (only ").append(stockMatch.item().getQuantityAvailable()).append(" in stock)");
+                }
+            }
+            reply.append('\n');
+        }
+        if (!remaining.isEmpty()) {
+            stockIssue = true;
+            for (UnavailableItem item : remaining) {
+                reply.append("• ").append(item.requestedName()).append(" — unavailable\n");
+            }
+        }
+        reply.append("\nTotal: ₹").append(money(total));
+        if (!stockIssue) {
+            updated = new PendingOrder(pending.customer(), items, total, true, remaining);
+            reply.append("\n\nReply /confirm to place the order, or tell me what to change.");
+        } else {
+            reply.append("\n\nPlease change or remove unavailable items before confirming.");
+        }
+        return new Result(reply.toString(), updated);
+    }
+
+    private CandidateItem selectCandidate(UnavailableItem item, String answer) {
+        if (answer == null) return null;
+        String cleaned = answer.trim();
+        if (cleaned.matches("[1-9][0-9]*")) {
+            int choice = Integer.parseInt(cleaned) - 1;
+            return choice < item.alternatives().size() ? item.alternatives().get(choice) : null;
+        }
+        String normalized = normalizeName(cleaned);
+        return item.alternatives().stream()
+                .filter(candidate -> normalizeName(candidate.itemName()).equals(normalized))
+                .findFirst().orElse(null);
+    }
+
+    private String ambiguityPrompt(List<UnavailableItem> items) {
+        StringBuilder prompt = new StringBuilder();
+        for (UnavailableItem item : items) {
+            if (item.alternatives().isEmpty()) continue;
+            prompt.append("Which ").append(item.requestedName()).append(" did you mean?\n");
+            for (int i = 0; i < item.alternatives().size(); i++) {
+                CandidateItem candidate = item.alternatives().get(i);
+                prompt.append(i + 1).append(") ").append(candidate.itemName())
+                        .append(" — ₹").append(money(candidate.price()))
+                        .append(" (stock: ").append(candidate.quantityAvailable()).append(")\n");
+            }
+            prompt.append("Reply with the number or exact item name.\n\n");
+        }
+        return prompt.toString().stripTrailing();
     }
 
     /** Applies only a Gemini-classified modification to the draft. */
@@ -400,7 +523,27 @@ public class OrderService {
         }
     }
 
-    public record UnavailableItem(String requestedName, String productName, int quantity) { }
+    public record UnavailableItem(String requestedName, String productName, int quantity,
+                                  List<CandidateItem> alternatives) {
+        public UnavailableItem(String requestedName, String productName, int quantity) {
+            this(requestedName, productName, quantity, List.of());
+        }
+
+        public UnavailableItem {
+            alternatives = alternatives == null ? List.of() : List.copyOf(alternatives);
+        }
+    }
+
+    public record CandidateItem(String itemNumber, String itemName, BigDecimal price, int quantityAvailable) {
+        public static CandidateItem from(InventoryItem item) {
+            return new CandidateItem(item.getItemNumber(), item.getItemName(), item.getPrice(),
+                    item.getQuantityAvailable());
+        }
+
+        public InventoryItem toInventoryItem() {
+            return new InventoryItem(itemNumber, itemName, price, quantityAvailable);
+        }
+    }
 
     public record Result(String message, PendingOrder pendingOrder, boolean confirmRequested) {
         public Result(String message, PendingOrder pendingOrder) {

@@ -1,5 +1,7 @@
 package com.kasa.service;
 
+import com.fasterxml.jackson.core.type.TypeReference;
+import com.fasterxml.jackson.databind.ObjectMapper;
 import com.kasa.dto.response.AiOrderSuggestion;
 import com.kasa.model.Customer;
 import com.kasa.model.InventoryItem;
@@ -91,6 +93,77 @@ class OrderServiceTest {
     }
 
     @Test
+    void ambiguousOrderAsksCustomerToChooseAndKeepsCandidatesInPendingDraft() throws Exception {
+        InventoryItem goodlifeMilk = new InventoryItem("P-2", "Nandini Goodlife Toned Milk 1L",
+                new BigDecimal("34.00"), 8);
+        inventoryRepository.matches = List.of(
+                new InventoryMatch(MILK, 0.95),
+                new InventoryMatch(goodlifeMilk, 0.90));
+        aiService.suggestion = suggestion("NEW_ORDER", item("milk", "milk", "2"));
+
+        OrderService.Result result = orderService.process(CUSTOMER, null, "2 milk");
+
+        assertNotNull(result.pendingOrder());
+        assertFalse(result.pendingOrder().readyToConfirm());
+        assertTrue(result.pendingOrder().items().isEmpty());
+        assertEquals(2, result.pendingOrder().unavailableItems().get(0).alternatives().size());
+        assertTrue(result.message().contains("Which milk did you mean?"));
+        assertTrue(result.message().contains("1) Nandini Toned Milk 1L"));
+        assertTrue(result.message().contains("2) Nandini Goodlife Toned Milk 1L"));
+        assertTrue(result.message().contains("₹34.00"));
+        assertThrows(IllegalStateException.class, () -> orderService.confirm(result.pendingOrder()));
+    }
+
+    @Test
+    void customerChoiceAddsSelectedInventoryItemAndEnablesConfirmation() throws Exception {
+        InventoryItem goodlifeMilk = new InventoryItem("P-2", "Nandini Goodlife Toned Milk 1L",
+                new BigDecimal("34.00"), 8);
+        inventoryRepository.matches = List.of(
+                new InventoryMatch(MILK, 0.95),
+                new InventoryMatch(goodlifeMilk, 0.90));
+        aiService.suggestion = suggestion("NEW_ORDER", item("milk", "milk", "2"));
+        PendingOrder ambiguousDraft = orderService.process(CUSTOMER, null, "2 milk").pendingOrder();
+        ObjectMapper objectMapper = new ObjectMapper();
+        List<OrderService.UnavailableItem> restoredChoices = objectMapper.readValue(
+                objectMapper.writeValueAsString(ambiguousDraft.unavailableItems()),
+                new TypeReference<>() { });
+        ambiguousDraft = new PendingOrder(CUSTOMER, ambiguousDraft.items(), ambiguousDraft.total(),
+                ambiguousDraft.readyToConfirm(), restoredChoices);
+
+        OrderService.Result result = orderService.handlePendingMessage(ambiguousDraft, "2");
+
+        assertTrue(result.pendingOrder().readyToConfirm());
+        assertTrue(result.pendingOrder().unavailableItems().isEmpty());
+        assertEquals(1, result.pendingOrder().items().size());
+        assertEquals("P-2", result.pendingOrder().items().get(0).getItemNumber());
+        assertEquals("Nandini Goodlife Toned Milk 1L", result.pendingOrder().items().get(0).getItemName());
+        assertEquals(2, result.pendingOrder().items().get(0).getQuantity());
+        assertEquals(new BigDecimal("68.00"), result.pendingOrder().total());
+        assertTrue(result.message().contains("Reply /confirm"));
+
+        assertEquals(42L, orderService.confirm(result.pendingOrder()));
+        assertEquals("P-2", orderRepository.items.get(0).getItemNumber());
+    }
+
+    @Test
+    void invalidAmbiguousChoiceKeepsDraftWaitingAndRepeatsOptions() throws Exception {
+        InventoryItem goodlifeMilk = new InventoryItem("P-2", "Nandini Goodlife Toned Milk 1L",
+                new BigDecimal("34.00"), 8);
+        inventoryRepository.matches = List.of(
+                new InventoryMatch(MILK, 0.95),
+                new InventoryMatch(goodlifeMilk, 0.90));
+        aiService.suggestion = suggestion("NEW_ORDER", item("milk", "milk", "1"));
+        PendingOrder ambiguousDraft = orderService.process(CUSTOMER, null, "milk").pendingOrder();
+
+        OrderService.Result result = orderService.handlePendingMessage(ambiguousDraft, "3");
+
+        assertSame(ambiguousDraft, result.pendingOrder());
+        assertFalse(result.pendingOrder().readyToConfirm());
+        assertTrue(result.message().contains("1) Nandini Toned Milk 1L"));
+        assertTrue(result.message().contains("2) Nandini Goodlife Toned Milk 1L"));
+    }
+
+    @Test
     void confirmPersistsCustomerItemsAndCalculatedTotal() throws Exception {
         aiService.suggestion = suggestion("NEW_ORDER", item("milk", "Nandini Toned Milk 1L", "3"));
         PendingOrder pending = orderService.process(CUSTOMER, null, "3 milk").pendingOrder();
@@ -147,6 +220,11 @@ class OrderServiceTest {
 
         @Override
         public List<InventoryMatch> findSimilar(String productName) {
+            for (InventoryMatch match : matches) {
+                if (match.item().getItemName().equalsIgnoreCase(productName)) {
+                    return List.of(new InventoryMatch(match.item(), 1.0));
+                }
+            }
             return matches;
         }
     }
