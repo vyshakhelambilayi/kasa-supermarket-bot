@@ -13,7 +13,7 @@ import java.util.logging.Logger;
 public class PostgresCustomerRepository implements CustomerRepository {
 
     private static final Logger LOGGER = Logger.getLogger(PostgresCustomerRepository.class.getName());
-    private static final String JDBC_URL = "jdbc:postgresql://localhost:5432/kasadb";
+    private static final String DEFAULT_JDBC_URL = "jdbc:postgresql://localhost:5432/kasadb";
     private static final String SQL = """
             SELECT customer_id, name, phone_number
             FROM public.customers
@@ -27,7 +27,7 @@ public class PostgresCustomerRepository implements CustomerRepository {
 
     public PostgresCustomerRepository() {
         this(
-                JDBC_URL,
+                envOrDefault("KASA_DB_URL", DEFAULT_JDBC_URL),
                 envOrDefault("KASA_DB_USER", "kasabot"),
                 requireEnvironmentVariable("KASA_DB_PASSWORD"));
     }

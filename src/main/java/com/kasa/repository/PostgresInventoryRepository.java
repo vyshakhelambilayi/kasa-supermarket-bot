@@ -14,7 +14,7 @@ import java.util.logging.Logger;
 public class PostgresInventoryRepository implements InventoryRepository {
 
     private static final Logger LOGGER = Logger.getLogger(PostgresInventoryRepository.class.getName());
-    private static final String JDBC_URL = "jdbc:postgresql://localhost:5432/kasadb";
+    private static final String DEFAULT_JDBC_URL = "jdbc:postgresql://localhost:5432/kasadb";
     private static final String SQL = """
             SELECT item_number,
                    item_name,
@@ -31,14 +31,21 @@ public class PostgresInventoryRepository implements InventoryRepository {
             LIMIT 5
             """;
 
+    private final String jdbcUrl;
     private final String username;
     private final String password;
 
     public PostgresInventoryRepository() {
-        this(System.getenv().getOrDefault("KASA_DB_USER", "kasabot"), requirePassword());
+        this(System.getenv().getOrDefault("KASA_DB_URL", DEFAULT_JDBC_URL),
+                System.getenv().getOrDefault("KASA_DB_USER", "kasabot"), requirePassword());
     }
 
     public PostgresInventoryRepository(String username, String password) {
+        this(DEFAULT_JDBC_URL, username, password);
+    }
+
+    public PostgresInventoryRepository(String jdbcUrl, String username, String password) {
+        this.jdbcUrl = jdbcUrl;
         this.username = username;
         this.password = password;
     }
@@ -47,7 +54,7 @@ public class PostgresInventoryRepository implements InventoryRepository {
     public List<InventoryMatch> findSimilar(String productName) {
         if (productName == null || productName.isBlank()) return List.of();
 
-        try (var connection = DriverManager.getConnection(JDBC_URL, username, password)) {
+        try (var connection = DriverManager.getConnection(jdbcUrl, username, password)) {
             connection.setAutoCommit(false);
             try (var settings = connection.createStatement()) {
                 settings.execute("SET LOCAL pg_trgm.similarity_threshold = 0.15");

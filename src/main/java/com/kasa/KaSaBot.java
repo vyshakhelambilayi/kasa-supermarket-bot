@@ -17,7 +17,7 @@ import org.telegram.telegrambots.meta.api.objects.Update;
 /** Telegram API adapter. Update handling lives in {@link ChatController}. */
 public class KaSaBot extends TelegramLongPollingBot {
 
-    private final String botToken = "BOT_TOKEN";
+    private final String botToken = requireEnvironmentVariable("TELEGRAM_BOT_TOKEN");
     private final String botUsername = System.getenv().getOrDefault("TELEGRAM_BOT_USERNAME", "BOT_USERNAME");
     private final ChatController chatController = new ChatController(
             new CustomerService(new PostgresCustomerRepository()),
@@ -41,5 +41,13 @@ public class KaSaBot extends TelegramLongPollingBot {
     @Override
     public void onUpdateReceived(Update update) {
         chatController.handle(update, this);
+    }
+
+    private static String requireEnvironmentVariable(String name) {
+        String value = System.getenv(name);
+        if (value == null || value.isBlank()) {
+            throw new IllegalStateException("Required environment variable is not set: " + name);
+        }
+        return value;
     }
 }

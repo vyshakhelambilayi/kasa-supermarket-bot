@@ -15,16 +15,23 @@ import java.util.Optional;
 
 /** Persists the customer's editable order draft so it survives bot restarts. */
 public class PostgresDraftOrderRepository implements DraftOrderRepository {
-    private static final String JDBC_URL = "jdbc:postgresql://localhost:5432/kasadb";
+    private static final String DEFAULT_JDBC_URL = "jdbc:postgresql://localhost:5432/kasadb";
+    private final String jdbcUrl;
     private final String username;
     private final String password;
     private final ObjectMapper objectMapper = new ObjectMapper();
 
     public PostgresDraftOrderRepository() {
-        this(System.getenv().getOrDefault("KASA_DB_USER", "kasabot"), requirePassword());
+        this(System.getenv().getOrDefault("KASA_DB_URL", DEFAULT_JDBC_URL),
+                System.getenv().getOrDefault("KASA_DB_USER", "kasabot"), requirePassword());
     }
 
     public PostgresDraftOrderRepository(String username, String password) {
+        this(DEFAULT_JDBC_URL, username, password);
+    }
+
+    public PostgresDraftOrderRepository(String jdbcUrl, String username, String password) {
+        this.jdbcUrl = jdbcUrl;
         this.username = username;
         this.password = password;
     }
@@ -34,7 +41,7 @@ public class PostgresDraftOrderRepository implements DraftOrderRepository {
         String sql = "SELECT customer_id, customer_name, customer_phone, items::text, unavailable_items::text, "
                 + "total_amount, ready_to_confirm "
                 + "FROM public.order_drafts WHERE telegram_chat_id = ?";
-        try (var connection = DriverManager.getConnection(JDBC_URL, username, password);
+        try (var connection = DriverManager.getConnection(jdbcUrl, username, password);
              var statement = connection.prepareStatement(sql)) {
             statement.setLong(1, chatId);
             try (var result = statement.executeQuery()) {
@@ -73,7 +80,7 @@ public class PostgresDraftOrderRepository implements DraftOrderRepository {
         } catch (com.fasterxml.jackson.core.JsonProcessingException e) {
             throw new SQLException("Could not serialize the order draft.", e);
         }
-        try (var connection = DriverManager.getConnection(JDBC_URL, username, password);
+        try (var connection = DriverManager.getConnection(jdbcUrl, username, password);
              var statement = connection.prepareStatement(sql)) {
             statement.setLong(1, chatId);
             statement.setString(2, pendingOrder.customer().getCustomerId());
@@ -89,7 +96,7 @@ public class PostgresDraftOrderRepository implements DraftOrderRepository {
 
     @Override
     public void delete(long chatId) throws SQLException {
-        try (var connection = DriverManager.getConnection(JDBC_URL, username, password);
+        try (var connection = DriverManager.getConnection(jdbcUrl, username, password);
              var statement = connection.prepareStatement("DELETE FROM public.order_drafts WHERE telegram_chat_id = ?")) {
             statement.setLong(1, chatId);
             statement.executeUpdate();

@@ -11,22 +11,29 @@ import java.util.List;
 /** Persists a confirmed order and decrements inventory atomically. */
 public class PostgresOrderRepository implements OrderRepository {
 
-    private static final String JDBC_URL = "jdbc:postgresql://localhost:5432/kasadb";
+    private static final String DEFAULT_JDBC_URL = "jdbc:postgresql://localhost:5432/kasadb";
+    private final String jdbcUrl;
     private final String username;
     private final String password;
 
     public PostgresOrderRepository() {
-        this(System.getenv().getOrDefault("KASA_DB_USER", "kasabot"), requirePassword());
+        this(System.getenv().getOrDefault("KASA_DB_URL", DEFAULT_JDBC_URL),
+                System.getenv().getOrDefault("KASA_DB_USER", "kasabot"), requirePassword());
     }
 
     public PostgresOrderRepository(String username, String password) {
+        this(DEFAULT_JDBC_URL, username, password);
+    }
+
+    public PostgresOrderRepository(String jdbcUrl, String username, String password) {
+        this.jdbcUrl = jdbcUrl;
         this.username = username;
         this.password = password;
     }
 
     @Override
     public long placeOrder(Customer customer, List<OrderItem> items, BigDecimal total) throws SQLException {
-        try (var connection = DriverManager.getConnection(JDBC_URL, username, password)) {
+        try (var connection = DriverManager.getConnection(jdbcUrl, username, password)) {
             connection.setAutoCommit(false);
             try {
                 long orderId = insertOrder(connection, customer, total);
